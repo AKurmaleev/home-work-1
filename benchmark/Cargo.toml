@@ -1,0 +1,11 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ba01 = { path = "../ba01" }
+ba02 = { path = "../ba02" }
+ba03 = { path = "../ba03" }
+ba04 = { path = "../ba04" }

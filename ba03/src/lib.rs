@@ -1,4 +1,4 @@
-pub fn sort_arguments(arguments: &mut [String]) {
+pub fn sort_arguments_initial(arguments: &mut [String]) {
     for index in 1..arguments.len() {
         let mut current = index;
 
@@ -9,39 +9,53 @@ pub fn sort_arguments(arguments: &mut [String]) {
     }
 }
 
+pub fn sort_arguments(arguments: &mut [String]) {
+    arguments.sort_unstable();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sort_arguments;
+    use super::{sort_arguments, sort_arguments_initial};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    fn assert_sort(input: &[&str], expected: &[&str]) {
+        let expected = strings(expected);
+        let mut initial = strings(input);
+        let mut optimized = initial.clone();
+
+        sort_arguments_initial(&mut initial);
+        sort_arguments(&mut optimized);
+
+        assert_eq!(initial, expected);
+        assert_eq!(optimized, expected);
+    }
+
     #[test]
     fn sorts_arguments_lexicographically() {
-        let mut arguments = strings(&["e", "d", "c", "b", "a"]);
-        sort_arguments(&mut arguments);
-        assert_eq!(arguments, strings(&["a", "b", "c", "d", "e"]));
+        assert_sort(&["e", "d", "c", "b", "a"], &["a", "b", "c", "d", "e"]);
     }
 
     #[test]
     fn keeps_repeated_arguments() {
-        let mut arguments = strings(&["A", "a", "A", "a", "A", "a"]);
-        sort_arguments(&mut arguments);
-        assert_eq!(arguments, strings(&["A", "A", "A", "a", "a", "a"]));
+        assert_sort(
+            &["A", "a", "A", "a", "A", "a"],
+            &["A", "A", "A", "a", "a", "a"],
+        );
     }
 
     #[test]
     fn handles_empty_arguments() {
-        let mut arguments = Vec::new();
-        sort_arguments(&mut arguments);
-        assert!(arguments.is_empty());
+        assert_sort(&[], &[]);
     }
 
     #[test]
     fn preserves_punctuation() {
-        let mut arguments = strings(&["hello,", "world.", "hello"]);
-        sort_arguments(&mut arguments);
-        assert_eq!(arguments, strings(&["hello", "hello,", "world."]));
+        assert_sort(
+            &["hello,", "world.", "hello"],
+            &["hello", "hello,", "world."],
+        );
     }
 }

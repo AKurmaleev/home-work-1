@@ -1,34 +1,12 @@
-use std::io::{self, Read};
+use std::io::{self, Write};
 
-fn count_bytes(input: &[u8]) -> usize {
-    input.len()
-}
+use ba01::count_bytes;
 
-fn main() {
-    let mut input = Vec::new();
-    io::stdin()
-        .read_to_end(&mut input)
-        .expect("failed to read standard input");
+fn main() -> io::Result<()> {
+    let stdin = io::stdin();
+    let bytes = count_bytes(stdin.lock())?;
 
-    println!("{}", count_bytes(&input));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::count_bytes;
-
-    #[test]
-    fn counts_empty_input() {
-        assert_eq!(count_bytes(b""), 0);
-    }
-
-    #[test]
-    fn counts_bytes_instead_of_characters() {
-        assert_eq!(count_bytes("🦀\n".as_bytes()), 5);
-    }
-
-    #[test]
-    fn counts_binary_input() {
-        assert_eq!(count_bytes(&[0, 1, 2, 255]), 4);
-    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    writeln!(output, "{bytes}")
 }

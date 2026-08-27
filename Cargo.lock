@@ -19,6 +19,16 @@ name = "ba04"
 version = "0.1.0"
 
 [[package]]
+name = "benchmark"
+version = "0.1.0"
+dependencies = [
+ "ba01",
+ "ba02",
+ "ba03",
+ "ba04",
+]
+
+[[package]]
 name = "bonus"
 version = "0.1.0"
 
