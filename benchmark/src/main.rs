@@ -1,3 +1,6 @@
+mod ba02_large;
+
+use std::env;
 use std::error::Error;
 use std::hint::black_box;
 use std::io::{self, BufReader, Cursor};
@@ -17,6 +20,14 @@ const SAMPLES: usize = 5;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> Result<()> {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments.first().is_some_and(|argument| argument == "ba02") {
+        return ba02_large::run(&arguments[1..]);
+    }
+    if !arguments.is_empty() {
+        return Err("usage: benchmark [ba02 <runtime|once> ...]".into());
+    }
+
     let bytes = build_byte_dataset(BYTE_DATASET_SIZE);
     let sort_input = build_sort_dataset(SORT_ITEMS);
 
