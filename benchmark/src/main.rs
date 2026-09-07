@@ -1,4 +1,6 @@
 mod ba02_large;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "gnu"))]
+mod windows_native;
 
 use std::env;
 use std::error::Error;
@@ -22,6 +24,11 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 fn main() -> Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     if arguments.first().is_some_and(|argument| argument == "ba02") {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "gnu"))]
+        if windows_native::is_command(arguments.get(1).map(String::as_str)) {
+            return windows_native::run(&arguments[1..]);
+        }
+
         return ba02_large::run(&arguments[1..]);
     }
     if !arguments.is_empty() {

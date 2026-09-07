@@ -1,0 +1,22 @@
+execution_environment=native_windows_process
+os=windows
+arch=x86_64
+build_flavor=portable
+build_target=x86_64-pc-windows-gnu
+build_target_cpu=x86-64
+processor_name=AMD Ryzen 9 9950X3D 16-Core Processor
+processor_identifier=Family 26 Model 68 Stepping 0, AuthenticAMD
+logical_cpus_in_process_mask=32
+process_affinity_mask=0x00000000ffffffff
+system_affinity_mask=0x00000000ffffffff
+processor_group_scope=current_group_only
+detected_x86_features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vp2intersect,avx512vpopcntdq,avxvnni,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,gfni,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,xsave,xsavec,xsaveopt,xsaves
+kernel_name=MINGW64_NT-10.0-26100
+machine=x86_64
+release: 1.95.0
+LLVM version: 22.1.2
+cargo 1.95.0
+gcc_version=15.2.0
+windows_product_name=Windows 10 Enterprise LTSC 2024
+windows_display_version=24H2
+windows_build=26100

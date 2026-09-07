@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 use ba02::{Counts, count_lines_words_bytes, count_lines_words_bytes_initial};
 
 const MIB: usize = 1024 * 1024;
-const DEFAULT_SIZE_MIB: usize = 256;
-const DEFAULT_SAMPLES: usize = 101;
-const MIN_MEASURED_PAIRS: usize = 101;
+pub(crate) const DEFAULT_SIZE_MIB: usize = 256;
+pub(crate) const DEFAULT_SAMPLES: usize = 101;
+pub(crate) const MIN_MEASURED_PAIRS: usize = 101;
 const READER_CAPACITY: usize = 64 * 1024;
-const WARM_UP_PAIRS: usize = 3;
+pub(crate) const WARM_UP_PAIRS: usize = 3;
 const TRIM_NUMERATOR: usize = 15;
 const TRIM_DENOMINATOR: usize = 100;
 const MIN_PRACTICAL_EFFECT: f64 = 0.05;
@@ -24,7 +24,8 @@ const RSS_CONFIDENCE_LEVEL: f64 = 0.95;
 const RSS_PRACTICAL_REDUCTION: f64 = 0.05;
 const RSS_EQUIVALENCE_MARGIN: f64 = 0.01;
 const RSS_MAX_ABSOLUTE_CI_TOTAL_WIDTH: f64 = 0.005;
-const RSS_MIN_RAW_SAMPLES: usize = 31;
+pub(crate) const DEFAULT_MEMORY_SAMPLES: usize = 31;
+const RSS_MIN_RAW_SAMPLES: usize = DEFAULT_MEMORY_SAMPLES;
 const RSS_BOOTSTRAP_RESAMPLES: usize = 10_000;
 const RSS_BOOTSTRAP_SEED: u64 = 0xd1b5_4a32_d192_ed03;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -163,6 +164,18 @@ struct Analysis {
     fingerprint: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OnceMeasurement {
+    pub(crate) variant: &'static str,
+    pub(crate) dataset: &'static str,
+    pub(crate) size_mib: usize,
+    pub(crate) size_bytes: usize,
+    pub(crate) reader_capacity: usize,
+    pub(crate) counts: Counts,
+    pub(crate) fingerprint: u64,
+    pub(crate) checksum: u64,
+}
+
 #[derive(Debug)]
 struct ReferenceCounter {
     lines: usize,
@@ -281,6 +294,14 @@ struct RssSample {
     sample_id: usize,
     acquisition_index: usize,
     value_kib: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowsMemorySample {
+    pub(crate) sample_id: usize,
+    pub(crate) acquisition_index: usize,
+    pub(crate) process_id: u32,
+    pub(crate) value_kib: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -458,12 +479,28 @@ fn run_once(args: &[String]) -> DynResult<()> {
         ));
     }
 
-    let variant = Variant::parse(&args[1])?;
-    let dataset = DatasetKind::parse(&args[2])?;
-    let size_mib = parse_positive_usize(args.get(3), DEFAULT_SIZE_MIB, "size_mib")?;
-    let size = size_in_bytes(size_mib)?;
-    let expected = analyze_reader(DeterministicInput::new(dataset, size))?;
-    let input = black_box(DeterministicInput::new(dataset, size));
+    let measurement = measure_once(&args[1..])?;
+    let stdout = io::stdout();
+    let mut output = io::BufWriter::new(stdout.lock());
+    write_once_record(&mut output, measurement)?;
+    output.flush()?;
+
+    Ok(())
+}
+
+pub(crate) fn measure_once(args: &[String]) -> DynResult<OnceMeasurement> {
+    if !(2..=3).contains(&args.len()) {
+        return Err(invalid_input(
+            "one-shot measurement requires <initial|optimized> <prose|boundary|mixed> [size_mib]",
+        ));
+    }
+
+    let variant = Variant::parse(&args[0])?;
+    let dataset = DatasetKind::parse(&args[1])?;
+    let size_mib = parse_positive_usize(args.get(2), DEFAULT_SIZE_MIB, "size_mib")?;
+    let size_bytes = size_in_bytes(size_mib)?;
+    let expected = analyze_reader(DeterministicInput::new(dataset, size_bytes))?;
+    let input = black_box(DeterministicInput::new(dataset, size_bytes));
     let reader = BufReader::with_capacity(READER_CAPACITY, input);
     let counts = match variant {
         Variant::Initial => count_lines_words_bytes_initial(reader)?,
@@ -482,24 +519,190 @@ fn run_once(args: &[String]) -> DynResult<()> {
         .into());
     }
 
-    let stdout = io::stdout();
-    let mut output = io::BufWriter::new(stdout.lock());
+    Ok(OnceMeasurement {
+        variant: variant.name(),
+        dataset: dataset.name(),
+        size_mib,
+        size_bytes,
+        reader_capacity: READER_CAPACITY,
+        counts,
+        fingerprint: expected.fingerprint,
+        checksum: counts_checksum(counts),
+    })
+}
+
+pub(crate) fn write_once_record(
+    output: &mut impl Write,
+    measurement: OnceMeasurement,
+) -> io::Result<()> {
     writeln!(
         output,
         "{{\"record\":\"once\",\"variant\":\"{}\",\"dataset\":\"{}\",\
          \"size_mib\":{},\"size_bytes\":{},\"reader_capacity\":{},\
          \"lines\":{},\"words\":{},\"bytes\":{},\"fingerprint\":\"{:016x}\",\
          \"checksum\":\"{:016x}\"}}",
+        measurement.variant,
+        measurement.dataset,
+        measurement.size_mib,
+        measurement.size_bytes,
+        measurement.reader_capacity,
+        measurement.counts.lines,
+        measurement.counts.words,
+        measurement.counts.bytes,
+        measurement.fingerprint,
+        measurement.checksum,
+    )
+}
+
+pub(crate) fn run_windows_worker(
+    args: &[String],
+    protocol_version: u32,
+    build_flavor: &str,
+    build_target: &str,
+    build_target_cpu: &str,
+) -> DynResult<()> {
+    if !(2..=3).contains(&args.len()) {
+        return Err(invalid_input(
+            "windows worker requires <initial|optimized> <prose|boundary|mixed> [size_mib]",
+        ));
+    }
+
+    let variant = Variant::parse(&args[0])?;
+    let dataset = DatasetKind::parse(&args[1])?;
+    let size_mib = parse_positive_usize(args.get(2), DEFAULT_SIZE_MIB, "size_mib")?;
+    let size = size_in_bytes(size_mib)?;
+    let bytes = build_dataset(dataset, size)?;
+    let analysis = verify_dataset(&bytes)?;
+
+    let stdout = io::stdout();
+    let mut output = io::BufWriter::new(stdout.lock());
+    writeln!(
+        output,
+        "READY\t{protocol_version}\t{build_flavor}\t{build_target}\t{build_target_cpu}\t{}\t{}\t{}\t{:016x}\t{:016x}",
         variant.name(),
         dataset.name(),
-        size_mib,
         size,
-        READER_CAPACITY,
-        counts.lines,
-        counts.words,
-        counts.bytes,
-        expected.fingerprint,
-        counts_checksum(counts),
+        analysis.fingerprint,
+        counts_checksum(analysis.counts),
+    )?;
+    output.flush()?;
+
+    let stdin = io::stdin();
+    for command in stdin.lock().lines() {
+        match command?.trim() {
+            "run" => {
+                let elapsed = measure_variant(variant, &bytes)?;
+                writeln!(output, "{}", elapsed.as_nanos())?;
+                output.flush()?;
+            }
+            "quit" => return Ok(()),
+            command => {
+                return Err(invalid_input(format!(
+                    "unknown windows worker command {command:?}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn write_build_comparison_records(
+    output: &mut impl Write,
+    variant: &str,
+    dataset: &str,
+    size_mib: usize,
+    logical_cpu: usize,
+    build_target: &str,
+    pairs: &[(Duration, Duration)],
+) -> DynResult<()> {
+    if pairs.len() < MIN_MEASURED_PAIRS {
+        return Err(invalid_input(format!(
+            "build comparison requires at least {MIN_MEASURED_PAIRS} measured pairs"
+        )));
+    }
+
+    let samples = pairs
+        .iter()
+        .enumerate()
+        .map(|(pair, &(portable, znver5))| SamplePair {
+            pair,
+            order: if pair.is_multiple_of(2) {
+                "portable-znver5"
+            } else {
+                "znver5-portable"
+            },
+            initial: portable,
+            optimized: znver5,
+        })
+        .collect::<Vec<_>>();
+    let selection = select_paired_samples(&samples)?;
+    let summary = summarize_runtime(&samples, &selection)?;
+
+    writeln!(
+        output,
+        "{{\"record\":\"config\",\"mode\":\"windows-build-runtime\",\
+         \"variant\":\"{variant}\",\"dataset\":\"{dataset}\",\
+         \"size_mib\":{size_mib},\"samples\":{},\"warm_up_pairs\":{WARM_UP_PAIRS},\
+         \"logical_cpu\":{logical_cpu},\"build_target\":\"{build_target}\",\
+         \"baseline_build\":\"portable\",\"baseline_target_cpu\":\"x86-64\",\
+         \"candidate_build\":\"znver5\",\"candidate_target_cpu\":\"znver5\",\
+         \"selection_unit\":\"whole_pair\",\
+         \"trim_numerator\":{TRIM_NUMERATOR},\"trim_denominator\":{TRIM_DENOMINATOR},\
+         \"selection_sort_key\":\"ln(portable_ns/znver5_ns)\",\
+         \"primary_effect\":\"exp(median(retained_ln_portable_over_znver5))\",\
+         \"bootstrap_resamples\":{BOOTSTRAP_RESAMPLES},\
+         \"ci_method\":\"deterministic_paired_percentile_bootstrap\",\
+         \"confidence_level\":{CONFIDENCE_LEVEL:.2},\
+         \"minimum_practical_effect\":{MIN_PRACTICAL_EFFECT:.2},\
+         \"practical_speedup_threshold\":{PRACTICAL_SPEEDUP:.2},\
+         \"adequacy_criterion\":\"(ci_high-ci_low)/primary_effect<=0.10\"}}",
+        pairs.len(),
+    )?;
+
+    for (sample, disposition) in samples.iter().zip(&selection.dispositions) {
+        let portable_ns = sample.initial.as_nanos();
+        let znver5_ns = sample.optimized.as_nanos();
+        let speedup = portable_ns as f64 / znver5_ns as f64;
+        writeln!(
+            output,
+            "{{\"record\":\"sample\",\"variant\":\"{variant}\",\
+             \"dataset\":\"{dataset}\",\"pair\":{},\"order\":\"{}\",\
+             \"portable_ns\":{portable_ns},\"znver5_ns\":{znver5_ns},\
+             \"speedup\":{speedup:.9},\"selection\":\"{}\"}}",
+            sample.pair,
+            sample.order,
+            disposition.name(),
+        )?;
+    }
+
+    writeln!(
+        output,
+        "{{\"record\":\"summary\",\"variant\":\"{variant}\",\
+         \"dataset\":\"{dataset}\",\"raw_pairs\":{},\"trim_each_tail\":{},\
+         \"retained_pairs\":{},\"portable_trimmed_mean_ns\":{:.3},\
+         \"portable_trimmed_median_ns\":{},\"portable_trimmed_mad_ns\":{},\
+         \"znver5_trimmed_mean_ns\":{:.3},\"znver5_trimmed_median_ns\":{},\
+         \"znver5_trimmed_mad_ns\":{},\"ratio_of_trimmed_means\":{:.9},\
+         \"paired_median_speedup\":{:.9},\"ci95_low\":{:.9},\
+         \"ci95_high\":{:.9},\"ci_relative_total_width\":{:.9},\
+         \"adequacy_criterion_met\":{},\"verdict\":\"{}\"}}",
+        summary.raw_pairs,
+        summary.trim_each_tail,
+        summary.retained_pairs,
+        summary.initial_trimmed_mean_ns,
+        summary.initial_trimmed_median_ns,
+        summary.initial_trimmed_mad_ns,
+        summary.optimized_trimmed_mean_ns,
+        summary.optimized_trimmed_median_ns,
+        summary.optimized_trimmed_mad_ns,
+        summary.ratio_of_trimmed_means,
+        summary.paired_median_speedup,
+        summary.ci95_low,
+        summary.ci95_high,
+        summary.ci_relative_total_width,
+        summary.adequacy_criterion_met,
+        performance_verdict(summary),
     )?;
     output.flush()?;
 
@@ -507,10 +710,18 @@ fn run_once(args: &[String]) -> DynResult<()> {
 }
 
 fn run_rss_summary(args: &[String]) -> DynResult<()> {
+    run_process_memory_summary(args, "rss-summary", "peak_rss_kib")
+}
+
+pub(crate) fn run_peak_working_set_summary(args: &[String]) -> DynResult<()> {
+    run_process_memory_summary(args, "windows-memory-summary", "peak_working_set_kib")
+}
+
+fn run_process_memory_summary(args: &[String], mode: &str, metric: &str) -> DynResult<()> {
     if args.len() != 3 {
-        return Err(invalid_input(
-            "rss-summary requires <initial_values_file> <optimized_values_file>",
-        ));
+        return Err(invalid_input(format!(
+            "{mode} requires <initial_values_file> <optimized_values_file>"
+        )));
     }
 
     let initial = read_rss_samples(&args[1], "initial")?;
@@ -518,7 +729,7 @@ fn run_rss_summary(args: &[String]) -> DynResult<()> {
     let summary = summarize_rss(&initial, &optimized)?;
     let stdout = io::stdout();
     let mut output = io::BufWriter::new(stdout.lock());
-    write_rss_summary_records(&mut output, summary)?;
+    write_process_memory_summary_records(&mut output, summary, mode, metric)?;
     output.flush()?;
 
     Ok(())
@@ -592,11 +803,30 @@ fn invalid_rss_value_error(implementation: &str, sample_id: usize) -> io::Error 
     )
 }
 
+#[cfg(test)]
 fn write_rss_summary_records(output: &mut impl Write, summary: RssSummary) -> io::Result<()> {
+    write_process_memory_summary_records(output, summary, "rss-summary", "peak_rss_kib")
+}
+
+fn write_process_memory_summary_records(
+    output: &mut impl Write,
+    summary: RssSummary,
+    mode: &str,
+    metric: &str,
+) -> io::Result<()> {
+    write_process_memory_policy_record(output, mode, metric)?;
+    write_process_memory_summary_record(output, summary)
+}
+
+fn write_process_memory_policy_record(
+    output: &mut impl Write,
+    mode: &str,
+    metric: &str,
+) -> io::Result<()> {
     writeln!(
         output,
-        "{{\"record\":\"config\",\"mode\":\"rss-summary\",\
-         \"metric\":\"peak_rss_kib\",\"experimental_unit\":\"one_implementation_measurement\",\
+        "{{\"record\":\"config\",\"mode\":\"{mode}\",\
+         \"metric\":\"{metric}\",\"experimental_unit\":\"one_implementation_measurement\",\
          \"minimum_raw_samples_per_implementation\":{RSS_MIN_RAW_SAMPLES},\
          \"trim_numerator\":{TRIM_NUMERATOR},\"trim_denominator\":{TRIM_DENOMINATOR},\
          \"selection\":\"independent_per_implementation\",\
@@ -610,8 +840,13 @@ fn write_rss_summary_records(output: &mut impl Write, summary: RssSummary) -> io
          \"practical_reduction_threshold\":{RSS_PRACTICAL_REDUCTION:.2},\
          \"equivalence_margin\":{RSS_EQUIVALENCE_MARGIN:.2},\
          \"max_absolute_ci_total_width\":{RSS_MAX_ABSOLUTE_CI_TOTAL_WIDTH:.3}}}"
-    )?;
+    )
+}
 
+fn write_process_memory_summary_record(
+    output: &mut impl Write,
+    summary: RssSummary,
+) -> io::Result<()> {
     writeln!(
         output,
         "{{\"record\":\"summary\",\
@@ -648,6 +883,79 @@ fn write_rss_summary_records(output: &mut impl Write, summary: RssSummary) -> io
         summary.adequacy_criterion_met,
         rss_verdict(summary),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_windows_memory_records(
+    output: &mut impl Write,
+    build_flavor: &str,
+    build_target: &str,
+    build_target_cpu: &str,
+    dataset: &str,
+    size_mib: usize,
+    logical_cpu: usize,
+    warm_ups_per_variant: usize,
+    initial: &[WindowsMemorySample],
+    optimized: &[WindowsMemorySample],
+) -> DynResult<()> {
+    let initial_rss = initial
+        .iter()
+        .map(|sample| RssSample {
+            sample_id: sample.sample_id,
+            acquisition_index: sample.acquisition_index,
+            value_kib: sample.value_kib,
+        })
+        .collect::<Vec<_>>();
+    let optimized_rss = optimized
+        .iter()
+        .map(|sample| RssSample {
+            sample_id: sample.sample_id,
+            acquisition_index: sample.acquisition_index,
+            value_kib: sample.value_kib,
+        })
+        .collect::<Vec<_>>();
+    let initial_selection = select_rss_samples(&initial_rss)?;
+    let optimized_selection = select_rss_samples(&optimized_rss)?;
+    let summary = summarize_rss(&initial_rss, &optimized_rss)?;
+
+    writeln!(
+        output,
+        "{{\"record\":\"windows_memory_context\",\"build_flavor\":\"{build_flavor}\",\
+         \"build_target\":\"{build_target}\",\"build_target_cpu\":\"{build_target_cpu}\",\
+         \"dataset\":\"{dataset}\",\"size_mib\":{size_mib},\
+         \"logical_cpu\":{logical_cpu},\"processor_group_scope\":\"current_group_only\",\
+         \"warm_ups_per_variant\":{warm_ups_per_variant},\
+         \"sample_order\":\"alternating_initial_optimized\"}}"
+    )?;
+    write_process_memory_policy_record(output, "windows-memory-run", "peak_working_set_kib")?;
+
+    let mut records = initial
+        .iter()
+        .zip(&initial_selection.dispositions)
+        .map(|(sample, disposition)| (sample.acquisition_index, "initial", sample, disposition))
+        .chain(optimized.iter().zip(&optimized_selection.dispositions).map(
+            |(sample, disposition)| (sample.acquisition_index, "optimized", sample, disposition),
+        ))
+        .collect::<Vec<_>>();
+    records.sort_unstable_by_key(|record| record.0);
+
+    for (_, implementation, sample, disposition) in records {
+        let selection = match disposition {
+            RssDisposition::Low => "low",
+            RssDisposition::Retained => "retained",
+            RssDisposition::High => "high",
+        };
+        writeln!(
+            output,
+            "{{\"record\":\"sample\",\"implementation\":\"{implementation}\",\
+             \"sample_id\":{},\"acquisition_index\":{},\"process_id\":{},\
+             \"peak_working_set_kib\":{},\"selection\":\"{selection}\"}}",
+            sample.sample_id, sample.acquisition_index, sample.process_id, sample.value_kib,
+        )?;
+    }
+
+    write_process_memory_summary_record(output, summary)?;
+    Ok(())
 }
 
 fn parse_positive_usize(value: Option<&String>, default: usize, name: &str) -> DynResult<usize> {
@@ -1247,11 +1555,12 @@ mod tests {
         DatasetKind, DeterministicInput, MIN_MEASURED_PAIRS, PairDisposition, PairedSelection,
         READER_CAPACITY, RSS_BOOTSTRAP_RESAMPLES, RSS_EQUIVALENCE_MARGIN,
         RSS_MAX_ABSOLUTE_CI_TOTAL_WIDTH, RSS_PRACTICAL_REDUCTION, RssDisposition, RssSample,
-        SamplePair, Variant, WARM_UP_PAIRS, analyze_bytes, build_dataset,
+        SamplePair, Variant, WARM_UP_PAIRS, WindowsMemorySample, analyze_bytes, build_dataset,
         independent_bootstrap_relative_reduction, median_absolute_deviation, median_u128,
         paired_bootstrap_ci, parse_rss_samples, rss_verdict, run_runtime, run_slice_untimed,
         sample_order, select_paired_samples, select_rss_samples, size_in_bytes, summarize_rss,
-        summarize_runtime, trim_count, write_rss_summary_records, write_sample_record,
+        summarize_runtime, trim_count, write_build_comparison_records, write_rss_summary_records,
+        write_sample_record, write_windows_memory_records,
     };
 
     fn read_in_chunks(dataset: DatasetKind, size: usize, chunk_size: usize) -> Vec<u8> {
@@ -1530,6 +1839,49 @@ mod tests {
     }
 
     #[test]
+    fn windows_memory_jsonl_preserves_fresh_process_samples() {
+        let initial = (0..31)
+            .map(|index| WindowsMemorySample {
+                sample_id: index + 1,
+                acquisition_index: index * 2,
+                process_id: 1_000 + index as u32,
+                value_kib: 200,
+            })
+            .collect::<Vec<_>>();
+        let optimized = (0..31)
+            .map(|index| WindowsMemorySample {
+                sample_id: index + 1,
+                acquisition_index: index * 2 + 1,
+                process_id: 2_000 + index as u32,
+                value_kib: 100,
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+
+        write_windows_memory_records(
+            &mut output,
+            "portable",
+            "x86_64-pc-windows-gnu",
+            "x86-64",
+            "prose",
+            256,
+            3,
+            1,
+            &initial,
+            &optimized,
+        )
+        .unwrap();
+
+        let jsonl = String::from_utf8(output).unwrap();
+        assert_eq!(jsonl.lines().count(), 65);
+        assert_eq!(jsonl.matches("\"selection\":\"low\"").count(), 8);
+        assert_eq!(jsonl.matches("\"selection\":\"retained\"").count(), 46);
+        assert_eq!(jsonl.matches("\"selection\":\"high\"").count(), 8);
+        assert!(jsonl.contains("\"build_flavor\":\"portable\""));
+        assert!(jsonl.contains("\"relative_reduction\":0.500000000"));
+    }
+
+    #[test]
     fn rss_parser_rejects_empty_short_zero_and_non_integer_input() {
         let error = parse_rss_samples(Cursor::new("\n"), "initial").unwrap_err();
         assert_eq!(error.to_string(), "initial values file contains no samples");
@@ -1732,6 +2084,43 @@ mod tests {
                 .unwrap()
                 .contains("\"pair\":100,\"order\":\"initial-optimized\"")
         );
+    }
+
+    #[test]
+    fn build_comparison_jsonl_identifies_builds_and_trims_101_pairs() {
+        let pairs = (0..101)
+            .map(|pair| {
+                let portable_ns = match pair {
+                    0..=14 => 50,
+                    15..=85 => 200,
+                    _ => 400,
+                };
+                (Duration::from_nanos(portable_ns), Duration::from_nanos(100))
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+
+        write_build_comparison_records(
+            &mut output,
+            "optimized",
+            "prose",
+            256,
+            3,
+            "x86_64-pc-windows-gnu",
+            &pairs,
+        )
+        .unwrap();
+
+        let jsonl = String::from_utf8(output).unwrap();
+        assert_eq!(jsonl.lines().count(), 103);
+        assert_eq!(jsonl.matches("\"selection\":\"low\"").count(), 15);
+        assert_eq!(jsonl.matches("\"selection\":\"retained\"").count(), 71);
+        assert_eq!(jsonl.matches("\"selection\":\"high\"").count(), 15);
+        assert_eq!(jsonl.matches("\"order\":\"portable-znver5\"").count(), 51);
+        assert_eq!(jsonl.matches("\"order\":\"znver5-portable\"").count(), 50);
+        assert!(jsonl.contains("\"baseline_target_cpu\":\"x86-64\""));
+        assert!(jsonl.contains("\"candidate_target_cpu\":\"znver5\""));
+        assert!(jsonl.contains("\"raw_pairs\":101,\"trim_each_tail\":15,\"retained_pairs\":71"));
     }
 
     #[test]

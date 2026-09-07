@@ -27,7 +27,7 @@
 - Для каждой реализации рассчитываются среднее и медиана; сравнительный результат рассчитывается по тем же сохранённым парам.
 - Peak RSS измеряется отдельно: один прогрев и 31 новый процесс на реализацию. После исключения 15% значений с каждого края остаётся 23 наблюдения.
 
-Измерения выполнены под WSL2 на машине с AMD Ryzen 9 9950X.
+Измерения выполнены под WSL2 на машине с AMD Ryzen 9 9950X3D.
 
 ## Время выполнения
 
@@ -79,6 +79,12 @@ Portable- и `znver5`-сборки измерялись последовател
 
 ## Вывод
 
-Потоковая реализация существенно уменьшает peak RSS и ускоряет обработку обычного текста, но проигрывает на `mixed`-распределении. Специфический выигрыш от Zen 5 под WSL2 не подтверждён; для такого вывода нужен отдельный запуск в нативной системе с контролем топологии процессора и аппаратными счётчиками.
+Потоковая реализация существенно уменьшает peak RSS и ускоряет обработку обычного текста, но проигрывает на `mixed`-распределении. Специфический выигрыш от Zen 5 внутри WSL2 не подтверждён.
 
-Raw data: [portable runtime](benchmark/results/ba02-portable-wsl2-rule63.jsonl), [`znver5` runtime](benchmark/results/ba02-znver5-wsl2-rule63.jsonl), [initial RSS](benchmark/results/ba02-initial-peak-rss-kib-rule63.txt), [optimized RSS](benchmark/results/ba02-optimized-peak-rss-kib-rule63.txt).
+## Бонус: нативная Windows
+
+Дополнительно выполнено парное сравнение portable- и `znver5`-сборок на Ryzen 9 9950X3D под нативной Windows build 26100. Практически значимый порог 5% пройден в пяти из шести нагрузок; для streaming / `mixed` получено около 3.4%. Streaming также уменьшил Peak Working Set примерно на 99.1%, но сохранил регрессию на `mixed`.
+
+Подробности и raw data: [native Windows benchmark](benchmark/WINDOWS_NATIVE.md).
+
+Raw data WSL2: [portable runtime](benchmark/results/ba02-portable-wsl2-rule63.jsonl), [`znver5` runtime](benchmark/results/ba02-znver5-wsl2-rule63.jsonl), [initial RSS](benchmark/results/ba02-initial-peak-rss-kib-rule63.txt), [optimized RSS](benchmark/results/ba02-optimized-peak-rss-kib-rule63.txt).
