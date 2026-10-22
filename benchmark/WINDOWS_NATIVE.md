@@ -1,87 +1,87 @@
-# Бонусный benchmark `ba02` на Ryzen 9 9950X3D
+# Bonus `ba02` benchmark on Ryzen 9 9950X3D
 
-Цель — отдельно проверить две вещи на нативной Windows build 26100 (24H2):
+The goal is to test two things separately on native Windows build 26100 (24H2):
 
-1. эффект потоковой реализации из `ba02`;
-2. эффект компиляции с `target-cpu=znver5` относительно portable-сборки.
+1. the effect of the streaming implementation in `ba02`;
+2. the effect of compiling with `target-cpu=znver5` compared with a portable build.
 
-Основное решение домашней работы не изменялось. Benchmark использует дополнительный код.
+The main homework solution was not changed. The benchmark uses additional code.
 
-## Стенд и методика
+## Test environment and methodology
 
-- CPU: AMD Ryzen 9 9950X3D, 16 ядер / 32 логических процессора.
-- ОС: Windows build 26100 (24H2), нативный процесс.
-- Компилятор: Rust 1.95.0, LLVM 22.1.2, GNU target `x86_64-pc-windows-gnu`.
-- Сборки: portable `target-cpu=x86-64` и отдельная `target-cpu=znver5`.
-- Данные: `prose`, `boundary`, `mixed`, по 256 MiB.
-- Время: 3 прогревочные пары, затем 101 пара с чередованием A/B и B/A.
-- Отброшено по 15 пар с каждого края; сохранена 71 пара.
-- Приведены усечённые среднее, медиана, MAD и парный 95% CI по сохранённым наблюдениям.
-- Все серии прошли заранее выбранный критерий достаточной ширины CI.
-- Поток закреплён за logical CPU 0.
-- Peak Working Set измерен отдельно: свежий процесс на наблюдение, 1 прогрев и 31 наблюдение на реализацию; каждая реализация отсекалась независимо, осталось по 23 наблюдения.
+- CPU: AMD Ryzen 9 9950X3D, 16 cores / 32 logical processors.
+- OS: Windows build 26100 (24H2), native process.
+- Compiler: Rust 1.95.0, LLVM 22.1.2, GNU target `x86_64-pc-windows-gnu`.
+- Builds: portable `target-cpu=x86-64` and a separate `target-cpu=znver5` build.
+- Data: `prose`, `boundary`, `mixed`, 256 MiB each.
+- Timing: 3 warm-up pairs, then 101 pairs alternating A/B and B/A.
+- 15 pairs were discarded from each tail; 71 pairs were retained.
+- The trimmed mean, median, MAD, and paired 95% CI are reported for the retained observations.
+- All series met the preselected CI-width adequacy criterion.
+- The thread was pinned to logical CPU 0.
+- Peak Working Set was measured separately: a fresh process per observation, 1 warm-up and 31 observations per implementation; each implementation was trimmed independently, leaving 23 observations each.
 
-Создание тестовых данных не входит в измеряемое время. Результаты обеих реализаций сверялись до измерений.
+Test data generation is excluded from the measured time. The results of both implementations were checked against each other before measurements.
 
-## Что именно было применено
+## What was applied
 
-### Потоковая обработка вместо хранения всего входа
+### Streaming instead of storing the entire input
 
-Initial-версия сначала вызывает `read_to_end`, копирует весь вход в растущий `Vec<u8>`, затем отдельно проходит по нему для подсчёта переводов строк и ещё раз — для подсчёта слов. Такой вариант прост, но хранит полный вход и выполняет несколько проходов по данным.
+The initial version first calls `read_to_end`, copies the entire input into a growing `Vec<u8>`, then makes a separate pass over it to count newlines and another pass to count words. This approach is simple, but stores the entire input and makes multiple passes over the data.
 
-Streaming-версия работает через `BufRead::fill_buf` с буфером 64 KiB. За один проход по очередному блоку она одновременно считает байты, строки и начала слов, после чего помечает блок обработанным через `consume`. Состояние `inside_word` переносится между блоками, поэтому слово, пересекающее границу буфера, считается правильно.
+The streaming version uses `BufRead::fill_buf` with a 64 KiB buffer. In a single pass over each block, it counts bytes, lines, and word starts simultaneously, then marks the block as processed using `consume`. The `inside_word` state is carried across blocks, so a word crossing a buffer boundary is counted correctly.
 
-Обе реализации имеют временную сложность `Θ(n)`, но различаются константами и дополнительной памятью:
+Both implementations have `Θ(n)` time complexity, but differ in their constants and auxiliary memory:
 
-- initial: полный вход в `Vec`, `Θ(n)` дополнительной памяти;
-- streaming: фиксированный буфер и несколько счётчиков, `Θ(1)` дополнительной памяти относительно размера входа.
+- initial: the entire input in a `Vec`, `Θ(n)` auxiliary memory;
+- streaming: a fixed buffer and a few counters, `Θ(1)` auxiliary memory relative to input size.
 
-Это алгоритмическая и I/O-оптимизация, полезная не только для Zen 5.
+This is an algorithmic and I/O optimization that is useful beyond Zen 5.
 
-### Отдельная специализация под Zen 5
+### Separate Zen 5 specialization
 
-Тот же безопасный Rust-код собран двумя способами: portable-вариант с `target-cpu=x86-64` и отдельный вариант с `target-cpu=znver5`. Ручные SIMD-инструкции, ассемблер и `unsafe` не добавлялись: выбор инструкций и разворачивание циклов выполнял LLVM.
+The same safe Rust code was built in two ways: a portable variant with `target-cpu=x86-64` and a separate variant with `target-cpu=znver5`. No manual SIMD instructions, assembly, or `unsafe` were added: LLVM handled instruction selection and loop unrolling.
 
-Это не замена основной версии домашней работы и не перенос `znver5` в общий baseline. Сравниваются отдельные release-бинарники, а специализированный бинарник допускается к запуску только после проверки CPU и необходимых OS-exposed ISA-возможностей.
+This neither replaces the main homework version nor moves `znver5` into the shared baseline. Separate release binaries are compared, and the specialized binary is allowed to run only after checking the CPU and the required OS-exposed ISA capabilities.
 
-## Initial против streaming
+## Initial versus streaming
 
-Время указано в миллисекундах. Speedup больше `1×` означает преимущество streaming.
+Times are in milliseconds. A speedup greater than `1×` indicates an advantage for streaming.
 
-### Portable-сборка
+### Portable build
 
-| Данные | Initial mean / median, ms | Streaming mean / median, ms | MAD initial / streaming, ms | Median speedup, 95% CI |
+| Data | Initial mean / median, ms | Streaming mean / median, ms | MAD initial / streaming, ms | Median speedup, 95% CI |
 |---|---:|---:|---:|---:|
 | `prose` | 136.378 / 136.325 | 89.888 / 90.226 | 1.006 / 0.952 | 1.517× [1.508; 1.525] |
 | `boundary` | 144.222 / 143.223 | 90.191 / 90.270 | 1.669 / 1.146 | 1.596× [1.580; 1.610] |
 | `mixed` | 796.496 / 796.471 | 883.269 / 883.224 | 2.508 / 2.197 | 0.902× [0.901; 0.903] |
 
-### `znver5`-сборка
+### `znver5` build
 
-| Данные | Initial mean / median, ms | Streaming mean / median, ms | MAD initial / streaming, ms | Median speedup, 95% CI |
+| Data | Initial mean / median, ms | Streaming mean / median, ms | MAD initial / streaming, ms | Median speedup, 95% CI |
 |---|---:|---:|---:|---:|
 | `prose` | 90.771 / 90.544 | 82.383 / 82.129 | 1.095 / 1.432 | 1.104× [1.096; 1.112] |
 | `boundary` | 97.763 / 97.809 | 79.408 / 79.479 | 0.832 / 1.255 | 1.229× [1.223; 1.235] |
 | `mixed` | 759.352 / 756.549 | 856.127 / 853.355 | 3.783 / 3.061 | 0.888× [0.886; 0.889] |
 
-Если перевести median speedup в изменение времени streaming относительно initial, получено:
+Converting the median speedup to a change in streaming time relative to initial gives:
 
-- portable / `prose`: примерно на 34.1% меньше времени;
-- portable / `boundary`: примерно на 37.3% меньше времени;
-- portable / `mixed`: примерно на 10.9% больше времени, то есть регрессия;
-- `znver5` / `prose`: примерно на 9.4% меньше времени;
-- `znver5` / `boundary`: примерно на 18.6% меньше времени;
-- `znver5` / `mixed`: примерно на 12.6% больше времени, то есть регрессия.
+- portable / `prose`: approximately 34.1% less time;
+- portable / `boundary`: approximately 37.3% less time;
+- portable / `mixed`: approximately 10.9% more time, a regression;
+- `znver5` / `prose`: approximately 9.4% less time;
+- `znver5` / `boundary`: approximately 18.6% less time;
+- `znver5` / `mixed`: approximately 12.6% more time, a regression.
 
-На `prose` и `boundary` streaming выигрывает за счёт отказа от полного копирования входа, меньшего числа проходов и повторного использования небольшого буфера. `boundary` дополнительно подтверждает, что перенос `inside_word` через границы 64-KiB блоков не ломает результат.
+On `prose` and `boundary`, streaming wins by avoiding a full copy of the input, making fewer passes, and reusing a small buffer. `boundary` additionally confirms that carrying `inside_word` across 64-KiB block boundaries does not break the result.
 
-На искусственном `mixed` состояние слова и условные переходы меняются гораздо чаще. Это правдоподобно мешает оптимизации stateful-цикла, тогда как отдельный проход initial для переводов строк хорошо векторизуется. Однако это только возможный механизм: причина регрессии отдельно не изолирована, аппаратные счётчики ветвлений и cache misses не собирались.
+On the synthetic `mixed` dataset, word state and branch outcomes change much more frequently. This plausibly hinders optimization of the stateful loop, whereas the initial implementation's separate newline-counting pass vectorizes well. However, this is only a possible mechanism: the cause of the regression was not isolated separately, and hardware branch and cache-miss counters were not collected.
 
-## Portable против `znver5`
+## Portable versus `znver5`
 
-Для каждой строки две сборки измерялись в отдельной парной серии. Speedup больше `1×` означает преимущество `znver5`.
+For each row, the two builds were measured in a separate paired series. A speedup greater than `1×` indicates an advantage for `znver5`.
 
-| Реализация / данные | Portable mean / median, ms | `znver5` mean / median, ms | MAD portable / `znver5`, ms | Median speedup, 95% CI |
+| Implementation / data | Portable mean / median, ms | `znver5` mean / median, ms | MAD portable / `znver5`, ms | Median speedup, 95% CI |
 |---|---:|---:|---:|---:|
 | Initial / `prose` | 137.642 / 135.301 | 91.959 / 90.084 | 2.165 / 2.340 | 1.499× [1.479; 1.526] |
 | Initial / `boundary` | 146.294 / 145.614 | 100.145 / 99.322 | 2.777 / 2.494 | 1.470× [1.447; 1.478] |
@@ -90,53 +90,53 @@ Streaming-версия работает через `BufRead::fill_buf` с буф
 | Streaming / `boundary` | 93.533 / 91.917 | 80.692 / 79.875 | 2.451 / 1.639 | 1.152× [1.142; 1.167] |
 | Streaming / `mixed` | 878.832 / 870.241 | 850.611 / 841.196 | 13.023 / 10.940 | 1.034× [1.030; 1.036] |
 
-В пересчёте median speedup на уменьшение времени `znver5` относительно portable получено:
+Converting the median speedup to a reduction in `znver5` time relative to portable gives:
 
-- initial / `prose`: примерно 33.3%;
-- initial / `boundary`: примерно 32.0%;
-- initial / `mixed`: примерно 5.7%;
-- streaming / `prose`: примерно 9.1%;
-- streaming / `boundary`: примерно 13.2%;
-- streaming / `mixed`: примерно 3.3%.
+- initial / `prose`: approximately 33.3%;
+- initial / `boundary`: approximately 32.0%;
+- initial / `mixed`: approximately 5.7%;
+- streaming / `prose`: approximately 9.1%;
+- streaming / `boundary`: approximately 13.2%;
+- streaming / `mixed`: approximately 3.3%.
 
-Наиболее сильный эффект получен в initial-версии, где LLVM заменил более узкий portable-подсчёт переводов строк на AVX-512 код. Stateful streaming-цикл не превратился в аналогичный полностью векторный проход, поэтому его выигрыш скромнее и сильнее зависит от данных.
+The strongest effect was observed in the initial version, where LLVM replaced the narrower portable newline-counting code with AVX-512 code. The stateful streaming loop did not become a similar fully vectorized pass, so its gain is more modest and more dependent on the data.
 
-Во всех шести сравнениях 95% CI находится выше `1×`, то есть в этой кампании ускорение отделяется от наблюдавшегося разброса. Но статистическая различимость не равна практической ценности: заранее выбранный порог 5% пройден только в пяти случаях из шести. Streaming / `mixed` ускорился примерно на 3.3–3.4%, поэтому результат положительный, но ниже практического порога.
+In all six comparisons, the 95% CI is above `1×`, meaning that the speedup in this campaign is distinguishable from the observed variability. However, statistical distinguishability does not equal practical value: the preselected 5% threshold was exceeded in only five of six cases. Streaming / `mixed` sped up by approximately 3.3–3.4%, so the result is positive but below the practical threshold.
 
-## Память
+## Memory
 
-Peak Working Set измерен на `prose` размером 256 MiB. Это пиковый резидентный working set процесса; метрика не равна общему virtual/committed memory и не измеряет heap allocations функции.
+Peak Working Set was measured on a 256 MiB `prose` input. This is the process's peak resident working set; the metric is not equivalent to total virtual/committed memory and does not measure the function's heap allocations.
 
-| Сборка | Initial mean / median, KiB | Streaming mean / median, KiB | MAD initial / streaming, KiB | Снижение среднего, 95% CI |
+| Build | Initial mean / median, KiB | Streaming mean / median, KiB | MAD initial / streaming, KiB | Reduction in mean, 95% CI |
 |---|---:|---:|---:|---:|
 | Portable | 530,163.3 / 530,160 | 4,886.6 / 4,888 | 8 / 4 | 99.078% [99.078%; 99.079%] |
 | `znver5` | 530,137.2 / 530,136 | 4,852.9 / 4,856 | 20 / 4 | 99.085% [99.084%; 99.085%] |
 
-В memory-серии вход генерировался детерминированным reader внутри свежего процесса. Initial материализует его целиком в `Vec`, а streaming удерживает только текущий 64-KiB блок и постоянное состояние подсчёта. Поэтому средний Peak Working Set снизился:
+In the memory series, the input was generated by a deterministic reader inside a fresh process. Initial materializes it in full in a `Vec`, while streaming retains only the current 64-KiB block and constant-size counting state. As a result, mean Peak Working Set decreased:
 
-- portable: с 530,163.3 до 4,886.6 KiB — на 99.078%;
-- `znver5`: с 530,137.2 до 4,852.9 KiB — на 99.085%.
+- portable: from 530,163.3 to 4,886.6 KiB — by 99.078%;
+- `znver5`: from 530,137.2 to 4,852.9 KiB — by 99.085%.
 
-Peak Working Set охватывает весь резидентный working set процесса, включая runtime и поведение аллокатора, поэтому эти числа не равны точному объёму `Vec` или heap allocations функции. Количество и объём отдельных heap allocations не инструментировались. Доказанный вывод относится именно к Peak Working Set и к алгоритмической дополнительной памяти: initial — `Θ(n)`, streaming — `Θ(1)` относительно размера входа. Обе версии имеют временную сложность `Θ(n)`.
+Peak Working Set covers the process's entire resident working set, including runtime and allocator behavior, so these numbers do not equal the exact size of the `Vec` or the function's heap allocations. The count and size of individual heap allocations were not instrumented. The demonstrated conclusion applies specifically to Peak Working Set and algorithmic auxiliary memory: initial is `Θ(n)`, streaming is `Θ(1)` relative to input size. Both versions have `Θ(n)` time complexity.
 
-## Что изменил компилятор
+## What the compiler changed
 
-Проверка финального дизассемблированного бинарника показала:
+Inspection of the disassembled final binary showed:
 
-- portable initial считает переводы строк 128-битными SSE-инструкциями;
-- `znver5` initial использует AVX-512 сравнения, маски и векторное суммирование;
-- stateful цикл streaming остаётся скалярным, но разворачивается примерно с 2 до 8 байт на итерацию;
-- более сильное разворачивание увеличивает отдельные hot-path участки кода.
+- portable initial counts newlines using 128-bit SSE instructions;
+- `znver5` initial uses AVX-512 comparisons, masks, and vector summation;
+- the stateful streaming loop remains scalar, but is unrolled from approximately 2 to 8 bytes per iteration;
+- more aggressive unrolling increases the size of individual hot-path code sections.
 
-Это объясняет возможный механизм ускорения, но не доказывает вклад каждой инструкции отдельно: аппаратные performance counters не собирались.
+This explains a possible speedup mechanism, but does not establish the contribution of each instruction individually: hardware performance counters were not collected.
 
-## Ограничения и вывод
+## Limitations and conclusion
 
-Измерения относятся только к одной кампании на Ryzen 9 9950X3D под нативной Windows build 26100. Закрепление за CPU 0 не доказывает конкретное размещение по CCD/V-Cache и отсутствие работы на соседнем SMT-потоке. Режим питания не фиксировался; намеренная фоновая нагрузка не запускалась.
+The measurements apply only to a single campaign on a Ryzen 9 9950X3D under native Windows build 26100. Pinning to CPU 0 does not establish specific CCD/V-Cache placement or the absence of work on the neighboring SMT thread. The power mode was not fixed; no deliberate background load was started.
 
-Streaming радикально уменьшает Peak Working Set и ускоряет два текстовых распределения, но проигрывает на `mixed`. Сборка `znver5` дала измеримый выигрыш во всех шести парных сравнениях, однако только пять превысили практический порог 5%. Это локальный результат для данного процессора и workload, а не универсальная гарантия для Zen 5.
+Streaming drastically reduces Peak Working Set and speeds up two text distributions, but loses on `mixed`. The `znver5` build produced a measurable gain in all six paired comparisons, but only five exceeded the practical 5% threshold. This is a local result for this processor and workload, not a universal guarantee for Zen 5.
 
-## Воспроизведение
+## Reproduction
 
 ```sh
 CARGO_INCREMENTAL=0 HW1_BENCH_BUILD_FLAVOR=portable RUSTFLAGS='-C target-cpu=x86-64' cargo build --frozen --release -p benchmark --target x86_64-pc-windows-gnu --target-dir target/windows-portable
@@ -151,6 +151,6 @@ nm -C target/windows-znver5/x86_64-pc-windows-gnu/release/benchmark.exe
 objdump -Cd target/windows-znver5/x86_64-pc-windows-gnu/release/benchmark.exe
 ```
 
-Для полного сравнения сборок команда `windows-build-runtime` повторяется для обеих реализаций и трёх наборов данных.
+For a full build comparison, the `windows-build-runtime` command is repeated for both implementations and all three datasets.
 
 Raw data: [environment](results/ba02-windows-environment.txt), [portable runtime](results/ba02-portable-native-windows.jsonl), [`znver5` runtime](results/ba02-znver5-native-windows.jsonl), [paired build comparison](results/ba02-build-comparison-native-windows.jsonl), [portable memory](results/ba02-portable-memory-native-windows.jsonl), [`znver5` memory](results/ba02-znver5-memory-native-windows.jsonl).

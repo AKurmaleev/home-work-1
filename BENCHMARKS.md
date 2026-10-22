@@ -1,90 +1,90 @@
-# Дополнительный benchmark задания `ba02`
+# Additional benchmark for the `ba02` exercise
 
-Этот benchmark дополняет домашнюю работу и не меняет её основные задания. Цель — сравнить две реализации подсчёта строк, слов и байтов на больших входных данных.
+This benchmark supplements the homework without changing its main exercises. The goal is to compare two implementations of line, word, and byte counting on large inputs.
 
-## Сравниваемые реализации
+## Implementations compared
 
-- `count_lines_words_bytes_initial` читает весь вход в `Vec<u8>`, затем отдельно обрабатывает сохранённые данные.
-- `count_lines_words_bytes` обрабатывает `BufRead` последовательно блоками по 64 KiB и переносит состояние слова между блоками.
+- `count_lines_words_bytes_initial` reads the entire input into a `Vec<u8>`, then processes the stored data separately.
+- `count_lines_words_bytes` processes `BufRead` sequentially in 64 KiB blocks and carries word state across blocks.
 
-Обе реализации возвращают одинаковый результат. Перед измерениями он сверяется с независимым контрольным подсчётом.
+Both implementations return the same result. Before measurements, the result is checked against an independent reference count.
 
-## Наборы данных
+## Datasets
 
-Для каждого варианта используется вход размером 256 MiB:
+Each variant uses a 256 MiB input:
 
-- `prose` — обычный повторяемый ASCII-текст;
-- `boundary` — слова, пересекающие границы 64 KiB буфера;
-- `mixed` — смесь пробельных и непробельных байтов с менее предсказуемыми переходами.
+- `prose` — ordinary repeated ASCII text;
+- `boundary` — words crossing 64 KiB buffer boundaries;
+- `mixed` — a mixture of whitespace and non-whitespace bytes with less predictable transitions.
 
-## Методика
+## Methodology
 
-- Сборка выполняется в профиле `release`.
-- Создание входных данных не входит в измеряемое время.
-- Перед серией выполняются 3 прогревочные пары запусков.
-- Затем измеряется 101 пара `initial`/`optimized`; порядок внутри пар чередуется.
-- Из итоговой выборки исключаются 15% пар с каждого края, остаётся 71 пара.
-- Для каждой реализации рассчитываются среднее и медиана; сравнительный результат рассчитывается по тем же сохранённым парам.
-- Peak RSS измеряется отдельно: один прогрев и 31 новый процесс на реализацию. После исключения 15% значений с каждого края остаётся 23 наблюдения.
+- The build uses the `release` profile.
+- Input generation is excluded from the measured time.
+- Each series is preceded by 3 warm-up pairs of runs.
+- Then 101 `initial`/`optimized` pairs are measured, alternating the order within pairs.
+- 15% of pairs are excluded from each tail of the final sample, leaving 71 pairs.
+- The mean and median are calculated for each implementation; the comparative result is calculated from the same retained pairs.
+- Peak RSS is measured separately: one warm-up and 31 fresh processes per implementation. After excluding 15% of values from each tail, 23 observations remain.
 
-Измерения выполнены под WSL2 на машине с AMD Ryzen 9 9950X3D.
+Measurements were taken under WSL2 on a machine with an AMD Ryzen 9 9950X3D.
 
-## Время выполнения
+## Runtime
 
-Все значения времени указаны в миллисекундах. Ускорение больше `1×` означает преимущество потоковой реализации.
+All times are in milliseconds. A speedup greater than `1×` indicates an advantage for the streaming implementation.
 
-### Portable-сборка
+### Portable build
 
-| Данные | Initial mean / median | Optimized mean / median | Median speedup |
+| Data | Initial mean / median | Optimized mean / median | Median speedup |
 |---|---:|---:|---:|
 | `prose` | 161.740 / 161.650 | 84.155 / 84.038 | 1.93× |
 | `boundary` | 166.957 / 166.338 | 82.881 / 82.681 | 2.02× |
 | `mixed` | 797.412 / 795.862 | 838.978 / 836.667 | 0.95× |
 
-### Сборка с `target-cpu=znver5`
+### Build with `target-cpu=znver5`
 
-| Данные | Initial mean / median | Optimized mean / median | Median speedup |
+| Data | Initial mean / median | Optimized mean / median | Median speedup |
 |---|---:|---:|---:|
 | `prose` | 106.826 / 106.679 | 76.489 / 76.386 | 1.39× |
 | `boundary` | 117.665 / 117.253 | 80.819 / 80.621 | 1.45× |
 | `mixed` | 753.220 / 751.893 | 822.726 / 819.739 | 0.91× |
 
-Потоковая версия быстрее на обычном тексте и на словах, пересекающих границы буфера. На искусственном наборе `mixed` она медленнее, поэтому оптимизация полезна не для любого распределения входа.
+The streaming version is faster on ordinary text and on words crossing buffer boundaries. It is slower on the synthetic `mixed` dataset, so the optimization is not beneficial for every input distribution.
 
-## Пиковая память
+## Peak memory
 
-Peak RSS измерен на `prose` размером 256 MiB. Значения приведены в KiB.
+Peak RSS was measured on a 256 MiB `prose` input. Values are in KiB.
 
-| Реализация | Mean | Median |
+| Implementation | Mean | Median |
 |---|---:|---:|
 | Initial | 526,669.9 | 526,720 |
 | Optimized | 2,637.9 | 2,688 |
 
-Снижение среднего peak RSS составило примерно **99.50%**. Это измерение памяти всего процесса, а не только heap allocations функции.
+The reduction in mean peak RSS was approximately **99.50%**. This measures memory for the entire process, not just the function's heap allocations.
 
-## Сложность
+## Complexity
 
-| Реализация | Время | Дополнительная память |
+| Implementation | Time | Auxiliary memory |
 |---|---|---|
-| Initial | `Θ(n)` | `Θ(n)` для хранения всего входа |
-| Optimized | `Θ(n)` | `Θ(1)` относительно входа: фиксированный буфер 64 KiB |
+| Initial | `Θ(n)` | `Θ(n)` to store the entire input |
+| Optimized | `Θ(n)` | `Θ(1)` relative to input size: a fixed 64 KiB buffer |
 
-Алгоритмический класс времени не изменился. Основной выигрыш получен за счёт потоковой обработки, отказа от хранения всего входа и меньшего числа проходов по обычному тексту.
+The time complexity class did not change. The main gain came from streaming, avoiding storage of the entire input, and making fewer passes over ordinary text.
 
-## Ограничения
+## Limitations
 
-Измерения выполнены под WSL2. В этом окружении нельзя полностью контролировать power state процессора, размещение по CCD/V-Cache и нагрузку на соседний SMT-поток.
+Measurements were taken under WSL2. This environment does not allow full control over CPU power state, CCD/V-Cache placement, or load on the neighboring SMT thread.
 
-Portable- и `znver5`-сборки измерялись последовательно, а не в одном общем парном эксперименте. Поэтому различия между этими двумя таблицами нельзя считать доказательством эффекта `target-cpu=znver5` или микроархитектуры Zen 5. Подтверждены только различия между `initial` и `optimized` внутри каждой отдельной серии.
+The portable and `znver5` builds were measured sequentially, not in a single shared paired experiment. Therefore, differences between these two tables cannot be treated as evidence of the effect of `target-cpu=znver5` or the Zen 5 microarchitecture. Only differences between `initial` and `optimized` within each individual series are confirmed.
 
-## Вывод
+## Conclusion
 
-Потоковая реализация существенно уменьшает peak RSS и ускоряет обработку обычного текста, но проигрывает на `mixed`-распределении. Специфический выигрыш от Zen 5 внутри WSL2 не подтверждён.
+The streaming implementation substantially reduces peak RSS and speeds up ordinary text processing, but loses on the `mixed` distribution. A Zen 5-specific gain under WSL2 has not been confirmed.
 
-## Бонус: нативная Windows
+## Bonus: native Windows
 
-Дополнительно выполнено парное сравнение portable- и `znver5`-сборок на Ryzen 9 9950X3D под нативной Windows build 26100. Практически значимый порог 5% пройден в пяти из шести нагрузок; для streaming / `mixed` получено около 3.4%. Streaming также уменьшил Peak Working Set примерно на 99.1%, но сохранил регрессию на `mixed`.
+An additional paired comparison of portable and `znver5` builds was performed on a Ryzen 9 9950X3D under native Windows build 26100. The practical significance threshold of 5% was exceeded in five of six workloads; streaming / `mixed` achieved about 3.4%. Streaming also reduced Peak Working Set by approximately 99.1%, but retained the regression on `mixed`.
 
-Подробности и raw data: [native Windows benchmark](benchmark/WINDOWS_NATIVE.md).
+Details and raw data: [native Windows benchmark](benchmark/WINDOWS_NATIVE.md).
 
-Raw data WSL2: [portable runtime](benchmark/results/ba02-portable-wsl2-rule63.jsonl), [`znver5` runtime](benchmark/results/ba02-znver5-wsl2-rule63.jsonl), [initial RSS](benchmark/results/ba02-initial-peak-rss-kib-rule63.txt), [optimized RSS](benchmark/results/ba02-optimized-peak-rss-kib-rule63.txt).
+WSL2 raw data: [portable runtime](benchmark/results/ba02-portable-wsl2-rule63.jsonl), [`znver5` runtime](benchmark/results/ba02-znver5-wsl2-rule63.jsonl), [initial RSS](benchmark/results/ba02-initial-peak-rss-kib-rule63.txt), [optimized RSS](benchmark/results/ba02-optimized-peak-rss-kib-rule63.txt).
