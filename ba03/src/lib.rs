@@ -1,3 +1,17 @@
+//! Sorts UTF-8 command-line argument values without removing duplicates.
+//!
+//! ```
+//! let mut arguments = ["zebra".to_owned(), "apple".to_owned()];
+//! ba03::sort_arguments(&mut arguments);
+//! assert_eq!(arguments, ["apple", "zebra"]);
+//! ```
+
+#![forbid(unsafe_code)]
+
+/// Sorts in place using insertion sort for the assignment's manual variant.
+///
+/// Ordering is case-sensitive and lexicographic; punctuation and duplicate
+/// multiplicity are preserved. Worst-case time is quadratic in argument count.
 pub fn sort_arguments_initial(arguments: &mut [String]) {
     for index in 1..arguments.len() {
         let mut current = index;
@@ -9,6 +23,10 @@ pub fn sort_arguments_initial(arguments: &mut [String]) {
     }
 }
 
+/// Sorts in place using case-sensitive lexicographic string ordering.
+///
+/// Preserves punctuation and duplicate multiplicity. Equal strings do not need
+/// stable ordering, so the standard unstable sort is sufficient.
 pub fn sort_arguments(arguments: &mut [String]) {
     arguments.sort_unstable();
 }
@@ -49,6 +67,13 @@ mod tests {
     #[test]
     fn handles_empty_arguments() {
         assert_sort(&[], &[]);
+    }
+
+    #[test]
+    fn handles_single_sorted_empty_and_unicode_arguments() {
+        assert_sort(&["single"], &["single"]);
+        assert_sort(&["", "A", "a"], &["", "A", "a"]);
+        assert_sort(&["🦀", "é", "z", ""], &["", "z", "é", "🦀"]);
     }
 
     #[test]

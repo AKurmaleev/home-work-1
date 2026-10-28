@@ -565,7 +565,7 @@ fn run_build_runtime(args: &[String]) -> DynResult<()> {
         "portable",
         "x86-64",
     )?;
-    let mut znver5 = Worker::start(
+    let mut znver5 = match Worker::start(
         &candidate_exe,
         logical_cpu,
         variant,
@@ -573,33 +573,55 @@ fn run_build_runtime(args: &[String]) -> DynResult<()> {
         size_mib,
         "znver5",
         "znver5",
-    )?;
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            let cleanup = portable
+                .finish()
+                .map_err(|error| io::Error::other(error.to_string()));
+            return Err(
+                merge_results(Err::<(), _>(io::Error::other(error.to_string())), cleanup)
+                    .expect_err("worker startup failed")
+                    .into(),
+            );
+        }
+    };
 
-    if !portable.ready.same_workload(&znver5.ready) {
-        return Err(io::Error::other(format!(
+    let measurements = (|| -> DynResult<_> {
+        if !portable.ready.same_workload(&znver5.ready) {
+            return Err(io::Error::other(format!(
             "portable and znver5 workers prepared different inputs:\nportable: {:?}\nznver5: {:?}",
             portable.ready, znver5.ready
         ))
         .into());
-    }
-
-    eprintln!(
-        "workers ready: variant={variant}, dataset={dataset}, size_mib={size_mib}, cpu={logical_cpu}"
-    );
-    for pair in 0..WARM_UP_PAIRS {
-        let _ = measure_build_pair(pair, &mut portable, &mut znver5)?;
-    }
-
-    let mut pairs = Vec::with_capacity(samples);
-    for pair in 0..samples {
-        pairs.push(measure_build_pair(pair, &mut portable, &mut znver5)?);
-        if (pair + 1).is_multiple_of(10) || pair + 1 == samples {
-            eprintln!("measured build pairs: {}/{}", pair + 1, samples);
         }
-    }
 
-    portable.finish()?;
-    znver5.finish()?;
+        eprintln!(
+            "workers ready: variant={variant}, dataset={dataset}, size_mib={size_mib}, cpu={logical_cpu}"
+        );
+        for pair in 0..WARM_UP_PAIRS {
+            let _ = measure_build_pair(pair, &mut portable, &mut znver5)?;
+        }
+
+        let mut pairs = Vec::with_capacity(samples);
+        for pair in 0..samples {
+            pairs.push(measure_build_pair(pair, &mut portable, &mut znver5)?);
+            if (pair + 1).is_multiple_of(10) || pair + 1 == samples {
+                eprintln!("measured build pairs: {}/{}", pair + 1, samples);
+            }
+        }
+
+        Ok(pairs)
+    })();
+    let cleanup = finish_pair(&mut portable, &mut znver5, |worker| {
+        worker
+            .finish()
+            .map_err(|error| io::Error::other(error.to_string()))
+    });
+    let (pairs, ()) = merge_results(
+        measurements.map_err(|error| io::Error::other(error.to_string())),
+        cleanup,
+    )?;
 
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
@@ -632,8 +654,18 @@ fn measure_build_pair(
     }
 }
 
+fn finish_pair<T>(
+    first: &mut T,
+    second: &mut T,
+    finish: impl Fn(&mut T) -> io::Result<()>,
+) -> io::Result<()> {
+    let first = finish(first);
+    let second = finish(second);
+    merge_results(first, second).map(|_| ())
+}
+
 struct Worker {
-    child: Child,
+    child: ChildGuard,
     input: Option<BufWriter<ChildStdin>>,
     responses: Receiver<io::Result<String>>,
     reader_thread: Option<JoinHandle<()>>,
@@ -652,28 +684,32 @@ impl Worker {
         expected_flavor: &str,
         expected_target_cpu: &str,
     ) -> DynResult<Self> {
-        let mut child = Command::new(executable)
-            .arg("ba02")
-            .arg("windows-worker")
-            .arg(logical_cpu.to_string())
-            .arg(variant)
-            .arg(dataset)
-            .arg(size_mib.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("failed to start worker {executable:?}: {error}"),
-                )
-            })?;
+        let mut child = ChildGuard(
+            Command::new(executable)
+                .arg("ba02")
+                .arg("windows-worker")
+                .arg(logical_cpu.to_string())
+                .arg(variant)
+                .arg(dataset)
+                .arg(size_mib.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("failed to start worker {executable:?}: {error}"),
+                    )
+                })?,
+        );
         let input = child
+            .0
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("worker stdin was not piped"))?;
         let output = child
+            .0
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("worker stdout was not piped"))?;
@@ -726,20 +762,29 @@ impl Worker {
 
     fn finish(&mut self) -> DynResult<()> {
         if self.finished {
-            return Ok(());
+            return Ok(self.join_reader()?);
         }
 
-        self.send_command("quit")?;
-        self.input.take();
-        let status = wait_for_exit(&mut self.child, WORKER_TIMEOUT)?;
-        self.finished = true;
-        self.join_reader();
-        if !status.success() {
-            return Err(
-                io::Error::other(format!("worker exited unsuccessfully with {status}")).into(),
-            );
-        }
-
+        let quit = self.send_command("quit");
+        let close = self.close_input();
+        let wait = wait_for_exit(&mut self.child.0, WORKER_TIMEOUT).and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "worker exited unsuccessfully with {status}"
+                )))
+            }
+        });
+        self.finished = matches!(self.child.0.try_wait(), Ok(Some(_)));
+        let reader = if self.finished {
+            self.join_reader()
+        } else {
+            Err(io::Error::other(
+                "worker completion unverified; reader not joined",
+            ))
+        };
+        merge_results(merge_results(merge_results(quit, close), wait), reader)?;
         Ok(())
     }
 
@@ -766,32 +811,40 @@ impl Worker {
         }
     }
 
-    fn join_reader(&mut self) {
-        if let Some(thread) = self.reader_thread.take() {
-            let _ = thread.join();
+    fn close_input(&mut self) -> io::Result<()> {
+        match self.input.take() {
+            Some(input) => input
+                .into_inner()
+                .map(|_| ())
+                .map_err(|error| error.into_error()),
+            None => Ok(()),
+        }
+    }
+
+    fn join_reader(&mut self) -> io::Result<()> {
+        match self.reader_thread.take() {
+            Some(thread) => thread
+                .join()
+                .map_err(|_| io::Error::other("worker reader thread panicked")),
+            None => Ok(()),
         }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        if !self.finished {
+            // Cancellation kills first: a blocked worker must not leave Drop
+            // waiting for space in its command pipe.
+            report_cleanup(self.child.stop());
+            self.finished = matches!(self.child.0.try_wait(), Ok(Some(_)));
+        }
+        report_cleanup(self.close_input());
         if self.finished {
-            self.join_reader();
-            return;
-        }
-
-        if let Some(input) = self.input.as_mut() {
-            let _ = writeln!(input, "quit");
-            let _ = input.flush();
-        }
-        self.input.take();
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        if wait_for_exit(&mut self.child, Duration::from_secs(5)).is_ok() {
-            self.finished = true;
-            self.join_reader();
+            report_cleanup(self.join_reader());
         } else {
+            // Termination was not verified. Do not block forever joining a
+            // pipe reader; the preceding cleanup error reports this gap.
             self.reader_thread.take();
         }
     }
@@ -811,7 +864,11 @@ fn start_line_reader(output: ChildStdout) -> (Receiver<io::Result<String>>, Join
                     }
                 }
                 Err(error) => {
-                    let _ = sender.send(Err(error));
+                    // A disconnected receiver means the owning operation has
+                    // ended; no caller remains to receive this read failure.
+                    if sender.send(Err(error)).is_err() {
+                        return;
+                    }
                     return;
                 }
             }
@@ -820,33 +877,95 @@ fn start_line_reader(output: ChildStdout) -> (Receiver<io::Result<String>>, Join
     (receiver, reader_thread)
 }
 
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
+fn poll_exit(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            let timeout_error = io::Error::new(
+            return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("child process timed out after {timeout:?}"),
-            );
-            child.kill()?;
-
-            let reap_deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if child.try_wait()?.is_some() {
-                    return Err(timeout_error);
-                }
-                if Instant::now() >= reap_deadline {
-                    return Err(io::Error::other(format!(
-                        "{timeout_error}; terminated child could not be reaped within 5s"
-                    )));
-                }
-                thread::sleep(PROCESS_POLL_INTERVAL);
-            }
+            ));
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
+    match poll_exit(child, timeout) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let cleanup = terminate_and_wait(child, Child::kill, |child| {
+                poll_exit(child, Duration::from_secs(5))
+            });
+            merge_results(Err(error), cleanup).map(|(status, _)| status)
+        }
+    }
+}
+
+// The callbacks isolate OS failures; cleanup ordering stays in this function.
+fn terminate_and_wait<C, T>(
+    child: &mut C,
+    kill: impl FnOnce(&mut C) -> io::Result<()>,
+    wait: impl FnOnce(&mut C) -> io::Result<T>,
+) -> io::Result<T> {
+    let terminated = kill(child);
+    let waited = wait(child);
+    merge_results(terminated, waited).map(|(_, status)| status)
+}
+
+// Evaluate all operations before merging. The initiating error keeps precedence
+// and later cleanup failures remain visible rather than replacing it.
+fn merge_results<T, U>(first: io::Result<T>, second: io::Result<U>) -> io::Result<(T, U)> {
+    match (first, second) {
+        (Ok(first), Ok(second)) => Ok((first, second)),
+        (Err(first), Err(second)) => Err(io::Error::new(
+            first.kind(),
+            format!("{first}; additionally: {second}"),
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+fn report_cleanup(result: io::Result<()>) {
+    report_cleanup_to(&mut io::stderr().lock(), result);
+}
+
+fn report_cleanup_to(output: &mut impl Write, result: io::Result<()>) {
+    if let Err(error) = result {
+        // Drop cannot return errors. Losing a diagnostic when stderr itself
+        // fails is permitted; panicking could abort an existing unwind.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "destructor diagnostic failure has no remaining reporting channel"
+        )]
+        let _ = writeln!(output, "benchmark cleanup failed: {error}");
+    }
+}
+
+struct ChildGuard(Child);
+
+impl ChildGuard {
+    fn stop(&mut self) -> io::Result<()> {
+        terminate_and_wait(&mut self.0, Child::kill, |child| {
+            poll_exit(child, Duration::from_secs(5))
+        })
+        .map(|_| ())
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        match self.0.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => report_cleanup(self.stop()),
+            Err(error) => {
+                let cleanup = self.stop();
+                report_cleanup(merge_results(Err(error), cleanup).map(|((), ())| ()));
+            }
+        }
     }
 }
 
@@ -857,45 +976,77 @@ fn run_memory_child(
     dataset: &str,
     size_mib: usize,
 ) -> DynResult<MemoryObservation> {
-    let mut child = Command::new(executable)
-        .arg("ba02")
-        .arg("windows-memory-worker")
-        .arg(logical_cpu.to_string())
-        .arg(variant)
-        .arg(dataset)
-        .arg(size_mib.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to start memory worker {executable:?}: {error}"),
-            )
-        })?;
+    let mut child = ChildGuard(
+        Command::new(executable)
+            .arg("ba02")
+            .arg("windows-memory-worker")
+            .arg(logical_cpu.to_string())
+            .arg(variant)
+            .arg(dataset)
+            .arg(size_mib.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("failed to start memory worker {executable:?}: {error}"),
+                )
+            })?,
+    );
 
-    let stdout_reader = start_child_pipe_reader(child.stdout.take(), "stdout")?;
-    let stderr_reader = start_child_pipe_reader(child.stderr.take(), "stderr")?;
-    let status = match wait_for_exit(&mut child, WORKER_TIMEOUT) {
-        Ok(status) => status,
+    let stdout_reader = start_child_pipe_reader(child.0.stdout.take(), "stdout")?;
+    let stderr_reader = match start_child_pipe_reader(child.0.stderr.take(), "stderr") {
+        Ok(reader) => reader,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = join_child_pipe_reader(stdout_reader, "stdout");
-            let _ = join_child_pipe_reader(stderr_reader, "stderr");
-            return Err(error.into());
+            let cleanup = child.stop();
+            let reader = if matches!(child.0.try_wait(), Ok(Some(_))) {
+                join_child_pipe_reader(stdout_reader, "stdout").map(|_| ())
+            } else {
+                Err(io::Error::other(
+                    "memory worker completion unverified; stdout reader not joined",
+                ))
+            };
+            return Err(
+                merge_results(merge_results(Err::<(), _>(error), cleanup), reader)
+                    .expect_err("reader setup failed")
+                    .into(),
+            );
         }
     };
-    let stdout = join_child_pipe_reader(stdout_reader, "stdout")?;
-    let stderr = join_child_pipe_reader(stderr_reader, "stderr")?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
+    let status = match wait_for_exit(&mut child.0, WORKER_TIMEOUT) {
+        Ok(status) => status,
+        Err(error) => {
+            let cleanup = child.stop();
+            let readers = if matches!(child.0.try_wait(), Ok(Some(_))) {
+                join_child_readers(stdout_reader, stderr_reader).map(|_| ())
+            } else {
+                Err(io::Error::other(
+                    "memory worker completion unverified; pipe readers not joined",
+                ))
+            };
+            return Err(
+                merge_results(merge_results(Err::<(), _>(error), cleanup), readers)
+                    .expect_err("waiting for the memory worker failed")
+                    .into(),
+            );
+        }
+    };
+    let readers = join_child_readers(stdout_reader, stderr_reader);
+    let outcome = if status.success() {
+        Ok(())
+    } else {
+        let diagnostic = readers
+            .as_ref()
+            .map(|(_, stderr)| String::from_utf8_lossy(stderr))
+            .unwrap_or_default();
+        Err(io::Error::other(format!(
             "memory worker exited with {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        ))
-        .into());
-    }
+            diagnostic.trim()
+        )))
+    };
+    let ((), (stdout, _stderr)) = merge_results(outcome, readers)?;
 
     let stdout = String::from_utf8(stdout)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -938,6 +1089,15 @@ fn join_child_pipe_reader(
     reader
         .join()
         .map_err(|_| io::Error::other(format!("child {name} reader thread panicked")))?
+}
+
+fn join_child_readers(
+    stdout: JoinHandle<io::Result<Vec<u8>>>,
+    stderr: JoinHandle<io::Result<Vec<u8>>>,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let stdout = join_child_pipe_reader(stdout, "stdout");
+    let stderr = join_child_pipe_reader(stderr, "stderr");
+    merge_results(stdout, stderr)
 }
 
 fn validate_worker_ready(
@@ -1130,9 +1290,17 @@ impl Drop for ThreadAffinityGuard {
         // SAFETY: the guard is created and dropped on the benchmark thread.
         // `previous_mask` is the non-zero mask returned by the successful
         // `SetThreadAffinityMask` call that created this guard.
-        unsafe {
-            SetThreadAffinityMask(GetCurrentThread(), self.previous_mask);
-        }
+        report_cleanup(restore_thread_affinity(|| unsafe {
+            SetThreadAffinityMask(GetCurrentThread(), self.previous_mask)
+        }));
+    }
+}
+
+fn restore_thread_affinity(set_mask: impl FnOnce() -> usize) -> io::Result<()> {
+    if set_mask() == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -1489,6 +1657,164 @@ mod tests {
         bytes_to_kib, is_command, logical_cpu_mask, peak_working_set_kib, pin_current_thread,
         validate_build_identity, validate_worker_ready,
     };
+
+    #[test]
+    fn detects_failed_affinity_restoration() {
+        assert!(super::restore_thread_affinity(|| 1).is_ok());
+        assert!(super::restore_thread_affinity(|| 0).is_err());
+    }
+
+    #[test]
+    fn destructor_reporting_tolerates_unavailable_stderr() {
+        struct FailedWriter;
+        impl std::io::Write for FailedWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("stderr unavailable"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        super::report_cleanup_to(
+            &mut FailedWriter,
+            Err(std::io::Error::other("cleanup failed")),
+        );
+        let mut output = Vec::new();
+        super::report_cleanup_to(&mut output, Err(std::io::Error::other("cleanup failed")));
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "benchmark cleanup failed: cleanup failed\n"
+        );
+    }
+
+    #[test]
+    fn cleanup_checks_each_failure_combination() {
+        for kill_fails in [false, true] {
+            for wait_fails in [false, true] {
+                let mut attempts = Vec::new();
+                let result = super::terminate_and_wait(
+                    &mut attempts,
+                    |attempts| {
+                        attempts.push("kill");
+                        if kill_fails {
+                            Err(std::io::Error::other("kill failed"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |attempts| {
+                        attempts.push("wait");
+                        if wait_fails {
+                            Err(std::io::Error::other("wait failed"))
+                        } else {
+                            Ok(42)
+                        }
+                    },
+                );
+                assert_eq!(attempts, ["kill", "wait"]);
+                assert_eq!(result.is_err(), kill_fails || wait_fails);
+                if let Err(error) = result {
+                    assert_eq!(error.to_string().contains("kill failed"), kill_fails);
+                    assert_eq!(error.to_string().contains("wait failed"), wait_fails);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_terminates_and_reaps_owned_child() {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "windows_native::tests::child_waits_for_eof"])
+            .env("HW1_REVIEW_CHILD_WAIT", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = super::ChildGuard(child);
+        let error = super::wait_for_exit(&mut child.0, std::time::Duration::ZERO).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(child.0.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn child_waits_for_eof() {
+        if std::env::var_os("HW1_REVIEW_CHILD_WAIT").is_some() {
+            std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+        }
+    }
+
+    #[test]
+    fn cleanup_attempts_wait_after_kill_failure_and_preserves_both_errors() {
+        let mut attempts = Vec::new();
+        let error = super::terminate_and_wait(
+            &mut attempts,
+            |attempts| {
+                attempts.push("kill");
+                Err(std::io::Error::other("kill failed"))
+            },
+            |attempts| {
+                attempts.push("wait");
+                Err::<(), _>(std::io::Error::other("wait failed"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, ["kill", "wait"]);
+        assert!(error.to_string().contains("kill failed"));
+        assert!(error.to_string().contains("wait failed"));
+    }
+
+    #[test]
+    fn finishes_both_workers_when_first_cleanup_fails() {
+        let mut first = false;
+        let mut second = false;
+        let error = super::finish_pair(&mut first, &mut second, |finished| {
+            *finished = true;
+            Err(std::io::Error::other("finish failed"))
+        })
+        .unwrap_err();
+        assert!(first && second);
+        assert_eq!(error.to_string().matches("finish failed").count(), 2);
+    }
+
+    #[test]
+    fn joins_both_readers_and_preserves_both_errors() {
+        let stdout = std::thread::spawn(|| Err(std::io::Error::other("stdout failed")));
+        let stderr = std::thread::spawn(|| Err(std::io::Error::other("stderr failed")));
+        let error = super::join_child_readers(stdout, stderr).unwrap_err();
+        assert!(error.to_string().contains("stdout failed"));
+        assert!(error.to_string().contains("stderr failed"));
+    }
+
+    #[test]
+    fn finished_worker_still_reports_reader_panic() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let (_, responses) = std::sync::mpsc::channel();
+        let mut worker = super::Worker {
+            child: super::ChildGuard(child),
+            input: None,
+            responses,
+            reader_thread: Some(std::thread::spawn(|| panic!("injected reader panic"))),
+            ready: super::WorkerReady {
+                protocol_version: 0,
+                build_flavor: String::new(),
+                build_target: String::new(),
+                build_target_cpu: String::new(),
+                variant: String::new(),
+                dataset: String::new(),
+                size_bytes: 0,
+                fingerprint: 0,
+                checksum: 0,
+            },
+            finished: true,
+        };
+        let error = worker.finish().unwrap_err();
+        assert!(error.to_string().contains("reader thread panicked"));
+    }
 
     #[test]
     fn recognizes_windows_commands_only() {

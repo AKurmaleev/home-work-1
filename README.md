@@ -17,9 +17,28 @@ Check the entire workspace:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings -D unused_must_use -D clippy::let_underscore_must_use -D clippy::unused_result_ok
+cargo test --locked --workspace
 ```
+
+The library packages declare Rust 1.85, the edition 2024 baseline. All homework
+packages (`hello`, `ba01`–`ba04`, and `bonus`), including their tests and doctests,
+were verified on `1.85.0-x86_64-pc-windows-gnu`:
+
+```sh
+cargo +1.85.0-x86_64-pc-windows-gnu check --locked --workspace --exclude benchmark --all-targets
+cargo +1.85.0-x86_64-pc-windows-gnu test --locked --workspace --exclude benchmark
+```
+
+The additional benchmark is not compatible with Rust 1.85: pre-existing code uses
+`usize::is_multiple_of`, `avxvnni` feature detection, and `__cpuid` calls whose
+safe-call form is unavailable on that compiler. Its source was not rewritten to
+force compatibility. Full-workspace checks and strict lint gates were verified
+with Rust/Cargo 1.99.1 on `x86_64-pc-windows-gnu`; the benchmark's earliest
+compatible compiler has not been established.
+The workspace has no optional Cargo features. `Cargo.lock` is tracked for
+reproducible contributor resolution, including the library packages.
 
 ## Exercise navigation
 
@@ -34,6 +53,21 @@ cargo test --workspace
 
 Workspace members: [`Cargo.toml`](Cargo.toml).
 
+## Input and API contracts
+
+- `ba01` and `ba02` read arbitrary bytes through EOF; no UTF-8 decoding is required.
+- `ba02` counts LF bytes as lines, including no extra line for an unterminated
+  suffix. Word separators follow `u8::is_ascii_whitespace`: tab, LF, form feed,
+  CR, and space; vertical tab and non-ASCII whitespace bytes are not separators.
+- `ba03` sorts UTF-8 arguments case-sensitively, preserving empty arguments,
+  punctuation, and duplicates. The executable name is excluded.
+- `ba04` deliberately implements arithmetic manually because the assignment
+  forbids built-in addition-mode helpers.
+- `bonus::parse_bitmap_8x8` retains the assignment's infallible signature and
+  panics on malformed rows; this is not a fallible parser for external input.
+- The `*_initial` byte counters are retained for comparison, not unbounded input:
+  they materialize the entire reader. Use the streaming variants for stdin.
+
 ## Additional `ba02` benchmark
 
 The benchmark does not replace the main solution. It compares the initial and streaming variants of `ba02` on 256 MiB inputs, as well as portable and `znver5` builds.
@@ -43,6 +77,14 @@ The benchmark does not replace the main solution. It compares the initial and st
 - [Benchmark source code](benchmark/src/ba02_large.rs)
 - [Windows runner and CPU checks](benchmark/src/windows_native.rs)
 - [Machine-readable results](benchmark/results/)
+- [Native integration safety and cleanup contract](benchmark/SAFETY.md)
+
+The bare `benchmark` command retains an older exploratory five-sample median
+comparison. It does not implement the Rule 63 paired sampling, raw-observation,
+trimming, and inference protocol; do not use it as comparative performance
+evidence. The reports above use the dedicated `ba02` commands instead.
+Historical raw measurements remain unchanged; this review did not run a new
+benchmark campaign or revalidate historical speed, memory, or disassembly claims.
 
 The main measured effect of the streaming version is a reduction from `Θ(n)` to `Θ(1)` auxiliary memory relative to input size. On native Windows, Peak Working Set decreased by approximately 99.1%. Performance depends on the data distribution: speedups were observed on `prose` and `boundary`, but a regression occurred on the synthetic `mixed` dataset.
 

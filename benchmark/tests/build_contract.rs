@@ -22,6 +22,29 @@ fn parses_supported_target_cpu_forms() {
 }
 
 #[test]
+fn recognizes_long_codegen_flags() {
+    for encoded in [
+        "--codegen=target-cpu=znver5",
+        "--codegen\u{1f}target-cpu=znver5",
+    ] {
+        assert_eq!(
+            parse_codegen_contract(encoded)
+                .unwrap()
+                .target_cpu
+                .as_deref(),
+            Some("znver5")
+        );
+    }
+    let contract =
+        parse_codegen_contract("-Ctarget-cpu=x86-64\u{1f}--codegen=target-feature=+avx2").unwrap();
+    assert_eq!(contract.target_feature_overrides, ["+avx2"]);
+    assert!(
+        parse_codegen_contract("-Ctarget-cpu=x86-64\u{1f}--codegen=target-cpu=znver5").is_err()
+    );
+    assert!(parse_codegen_contract("--codegen").is_err());
+}
+
+#[test]
 fn rejects_duplicate_target_cpu_flags() {
     let error = parse_codegen_contract("-C\u{1f}target-cpu=x86-64\u{1f}-C\u{1f}target-cpu=znver5")
         .unwrap_err();

@@ -15,12 +15,14 @@ pub fn parse_codegen_contract(encoded: &str) -> Result<CodegenContract, String> 
 
     while index < arguments.len() {
         let argument = arguments[index];
-        let codegen_option = if argument == "-C" {
+        let codegen_option = if matches!(argument, "-C" | "--codegen") {
             index += 1;
             arguments
                 .get(index)
                 .copied()
-                .ok_or_else(|| "-C requires a codegen option".to_owned())?
+                .ok_or_else(|| format!("{argument} requires a codegen option"))?
+        } else if let Some(option) = argument.strip_prefix("--codegen=") {
+            option
         } else if let Some(option) = argument.strip_prefix("-C") {
             option
         } else {

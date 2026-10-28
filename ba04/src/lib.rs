@@ -1,7 +1,24 @@
+//! Manual `u8` addition modes required by the assignment.
+//!
+//! The exercise forbids built-in checked, wrapping, and saturating addition in
+//! these implementations; standard arithmetic APIs remain the production default.
+//!
+//! ```
+//! assert_eq!(ba04::add_u8_checked(255, 1), None);
+//! assert_eq!(ba04::add_u8_wrapping(255, 1), 0);
+//! assert_eq!(ba04::add_u8_saturating(255, 1), 255);
+//! ```
+
+#![forbid(unsafe_code)]
+
+/// Returns the sum, or `None` if it exceeds `u8::MAX`; never panics on overflow.
 pub fn add_u8_checked(a: u8, b: u8) -> Option<u8> {
     if b > u8::MAX - a { None } else { Some(a + b) }
 }
 
+/// Returns the sum modulo 256 using a widened intermediate.
+///
+/// The maximum intermediate is 510. Each branch narrows a value in `0..=255`.
 pub fn add_u8_wrapping_initial(a: u8, b: u8) -> u8 {
     let sum = u16::from(a) + u16::from(b);
 
@@ -12,6 +29,7 @@ pub fn add_u8_wrapping_initial(a: u8, b: u8) -> u8 {
     }
 }
 
+/// Returns the sum modulo 256 without depending on overflow-check settings.
 pub fn add_u8_wrapping(a: u8, b: u8) -> u8 {
     let remaining = u8::MAX - a;
 
@@ -23,6 +41,7 @@ pub fn add_u8_wrapping(a: u8, b: u8) -> u8 {
     }
 }
 
+/// Returns the sum clamped to `u8::MAX`; never panics on overflow.
 pub fn add_u8_saturating(a: u8, b: u8) -> u8 {
     if b > u8::MAX - a { u8::MAX } else { a + b }
 }
